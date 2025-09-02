@@ -1,0 +1,162 @@
+<html lang='en'>
+<head>
+<meta charset='UTF-8'>
+<title>Prime Polarity Universe Simulation (Optimized)</title>
+<style>body,html{margin:0;overflow:hidden;background:#000}canvas{display:block}#controls{position:fixed;top:10px;left:10px;color:#fff;font-family:sans-serif;font-size:12px}input{vertical-align:middle;width:100px}button{margin:5px 0}#graph{margin-top:5px;background:rgba(255,255,255,0.1)}</style>
+</head>
+<body>
+<canvas id='c'></canvas>
+<div id="controls"></div>
+<script>
+(() => {
+    const M = Math;
+    const D = document;
+    const c = D.getElementById('c');
+    const x = c.getContext('2d');
+    let W = c.width = innerWidth;
+    let H = c.height = innerHeight;
+    window.onresize = () => { W = c.width = innerWidth; H = c.height = innerHeight; };
+
+    // --- Optimization: Pre-rendered Glow Canvas ---
+    const glowCanvas = D.createElement('canvas');
+    const glowCtx = glowCanvas.getContext('2d');
+    const glowSize = 128;
+    glowCanvas.width = glowCanvas.height = glowSize;
+
+    function createGlowImage() {
+        glowCtx.clearRect(0, 0, glowSize, glowSize);
+        const grad = glowCtx.createRadialGradient(glowSize/2, glowSize/2, 0, glowSize/2, glowSize/2, glowSize/2);
+        grad.addColorStop(0, 'rgba(255,255,255,1)');
+        grad.addColorStop(0.25, 'rgba(255,255,255,0.8)');
+        grad.addColorStop(1, 'rgba(255,255,255,0)');
+        glowCtx.fillStyle = grad;
+        glowCtx.fillRect(0, 0, glowSize, glowSize);
+    }
+    createGlowImage();
+
+
+    const ctrlDiv = D.getElementById('controls');
+    const P = {
+        minDist: 150, maxDist: 400, tempDrag: 0.5, count: 200, centerF: 0.005, lineThr: 100, grid: 10
+    };
+    const ctrlConfig = {
+        minDist: { name:"Min Dist", min:0, max:200 },
+        maxDist: { name:"Max Dist", min:0, max:2000, needsInit:true },
+        tempDrag: { name:"Temp Drag", min:0, max:70, f:v=>(v/100).toFixed(2) },
+        count: { name:"Particles", min:50, max:200, step:10, needsInit:true },
+        centerF: { name:"Center Force", min:0, max:0.1, step:0.001, f:v=>v.toFixed(3) },
+        lineThr: { name:"Line Thresh", min:50, max:200 },
+        grid: { name:"Entropy Grid", min:5, max:20, step:1, needsInit:true }
+    };
+
+    let particles = [], entropyHistory = [], maxEntropy;
+
+    ctrlDiv.innerHTML += `<canvas id="graph" width="200" height="100"></canvas><div><button id="refresh">Refresh</button><button id="randomize">Randomize</button></div>`;
+    const gx = D.getElementById('graph').getContext('2d');
+
+    Object.keys(ctrlConfig).forEach(key => {
+        const conf = ctrlConfig[key];
+        const val = P[key] * (key === 'tempDrag' ? 100 : 1);
+        ctrlDiv.insertAdjacentHTML('afterbegin', `
+            <div>${conf.name}: <span id="${key}Val">${conf.f?conf.f(val):val}</span><br>
+            <input type="range" id="${key}" min="${conf.min}" max="${conf.max}" value="${val}" step="${conf.step||'any'}"></div>`);
+        D.getElementById(key).oninput = e => {
+            const v = +e.target.value;
+            P[key] = key==='tempDrag'?v/100:v;
+            D.getElementById(`${key}Val`).textContent = conf.f?conf.f(v):v;
+            if(conf.needsInit) init();
+        };
+    });
+
+    D.getElementById('refresh').onclick = init;
+    D.getElementById('randomize').onclick = () => {
+        Object.keys(ctrlConfig).forEach(key => {
+            const conf = ctrlConfig[key];
+            let val = conf.min + M.random() * (conf.max - conf.min);
+            if (conf.step) val = M.round(val / conf.step) * conf.step;
+            
+            P[key] = key==='tempDrag'?val/100:+val;
+            D.getElementById(`${key}Val`).textContent = conf.f?conf.f(val):val;
+            D.getElementById(key).value = val;
+        });
+        init();
+    };
+    
+    const isPrime = n => {
+        if(n<2)return false;
+        for(let i=2;i*i<=n;i++)if(n%i===0)return false;
+        return true;
+    };
+    const gcd=(a,b)=>{while(b)[a,b]=[b,a%b];return a;};
+    const getColor=(normDensity,isP)=>{let r,g,b;const t=(v,f)=>(normDensity-v)*f;if(normDensity<0.25){r=0;g=M.floor(100*t(0,4));b=255;}else if(normDensity<0.50){r=0;g=255;b=M.floor(255*(1-t(0.25,4)));}else if(normDensity<0.75){r=M.floor(255*t(0.5,4));g=255;b=0;}else if(normDensity<1.00){r=255;g=M.floor(255*(1-t(0.75,4)*0.5));b=0;}else if(normDensity<1.50){r=255;g=M.floor(127*(1-t(1.0,2)));b=M.floor(255*t(1.0,2));}else{const nt=M.min(t(1.5,2),1);r=255;g=M.floor(127+128*nt);b=255;}if(isP){r=M.floor(r*0.7+76);g=M.floor(g*0.7+76);b=M.floor(b*0.7);}return[r,g,b];};
+    function updateMaxEntropy(){maxEntropy=M.log2(P.grid*P.grid);}
+
+    class Particle{
+        constructor(i){this.id=i+1;this.isPrime=isPrime(this.id);const g=M.ceil((1+M.sqrt(1+24*this.id))/6);const s=(3*g*g-7*g+6)/2;const a=((this.id-s+1)/(3*g-2))*2*M.PI+M.random()*0.1;const r=g*30+M.random()*10;this.x=W/2+r*M.cos(a);this.y=H/2+r*M.sin(a);this.vx=M.random()*2-1;this.vy=M.random()*2-1;this.size=this.isPrime?3:1+M.random();this.phase=this.isPrime?0:((this.id%9||9)*40);this.density=this.ax=this.ay=this.phaseInfluence=this.influenceCount=0;}
+        update(){const dT=this.isPrime?90:180+(this.density-5)*10;this.phase+=(dT-this.phase)*0.01;if(this.influenceCount>0)this.phase+=(this.phaseInfluence/this.influenceCount)*0.05;this.phase+=(M.random()-0.5)*(this.isPrime?0.5:1);this.phase=(this.phase%360+360)%360;const dC=M.hypot(W/2-this.x,H/2-this.y);if(dC>0){this.ax+=(W/2-this.x)/dC*P.centerF;this.ay+=(H/2-this.y)/dC*P.centerF;}this.vx=(this.vx+this.ax)*(1-(0.05+P.tempDrag));this.vy=(this.vy+this.ay)*(1-(0.05+P.tempDrag));this.x+=this.vx;this.y+=this.vy;if(this.x<0||this.x>W){this.vx*=-1;this.x=M.max(0,M.min(W,this.x));}if(this.y<0||this.y>H){this.vy*=-1;this.y=M.max(0,M.min(H,this.y));}}
+        draw(){const nD=M.min(this.density/15,2);const[r,g,b]=getColor(nD,this.isPrime);const gS=this.size*(1+nD)*(this.isPrime?1.5:1);x.globalCompositeOperation='lighter';x.fillStyle=`rgb(${r},${g},${b})`;x.drawImage(glowCanvas,this.x-gS,this.y-gS,gS*2,gS*2);x.globalCompositeOperation='source-over';x.beginPath();x.arc(this.x,this.y,this.size,0,2*M.PI);x.fill();}
+    }
+
+    function init(){if(!P.count||P.count<0)return;particles=Array.from({length:M.floor(P.count)},(_,i)=>new Particle(i));entropyHistory=[];updateMaxEntropy();}
+
+    let frame=0;
+    function animate(){
+        x.fillStyle='rgba(0,0,0,0.1)';x.fillRect(0,0,W,H);
+        if(!particles.length){requestAnimationFrame(animate);return;}
+
+        particles.forEach(p=>{p.ax=p.ay=p.density=p.phaseInfluence=p.influenceCount=0;});
+        
+        // --- Optimization: Spatial Grid for physics calculation ---
+        const grid = new Map();
+        const cellSize = P.maxDist;
+        if (cellSize <= 0) { requestAnimationFrame(animate); return; }
+
+        for (const p of particles) {
+            const key = `${M.floor(p.x/cellSize)},${M.floor(p.y/cellSize)}`;
+            if (!grid.has(key)) grid.set(key, []);
+            grid.get(key).push(p);
+        }
+
+        const minSq = P.minDist*P.minDist;
+        const infSq=minSq*4,denSq=minSq*2.25;
+
+        for (const p1 of particles) {
+            const gX=M.floor(p1.x/cellSize),gY=M.floor(p1.y/cellSize);
+            for(let dx=-1;dx<=1;dx++){
+                for(let dy=-1;dy<=1;dy++){
+                    const neighbors=grid.get(`${gX+dx},${gY+dy}`);
+                    if(!neighbors) continue;
+                    for(const p2 of neighbors){
+                        if(p1.id>=p2.id) continue; // Process each pair once
+
+                        const dX=p1.x-p2.x,dY=p1.y-p2.y;
+                        const distSq=dX*dX+dY*dY;
+                        if(distSq>cellSize*cellSize||distSq===0) continue;
+
+                        const dist=M.sqrt(distSq);
+                        const isShared=gcd(p1.id,p2.id)>1;
+                        const t1=p1.phase/180,t2=p2.phase/180;
+                        let attr1=2-t1,rep1=t1,attr2=2-t2,rep2=t2;
+                        if(p1.isPrime)attr1*=1.5;if(p2.isPrime)attr2*=1.5;
+                        
+                        if(distSq<minSq){const f=(P.minDist-dist)/P.minDist*0.25;const f1=f*rep1*(isShared?0.5:1)*(p1.isPrime&&p2.isPrime?0.3:1);const f2=f*rep2*(isShared?0.5:1)*(p1.isPrime&&p2.isPrime?0.3:1);p1.ax+=(dX/dist)*f1;p1.ay+=(dY/dist)*f1;p2.ax-=(dX/dist)*f2;p2.ay-=(dY/dist)*f2;}else{const f=(dist-P.minDist)/P.maxDist*0.25;const f1=f*attr1*(isShared?1.5:1)*(p1.isPrime||p2.isPrime?1.2:1);const f2=f*attr2*(isShared?1.5:1)*(p1.isPrime||p2.isPrime?1.2:1);p1.ax-=(dX/dist)*f1;p1.ay-=(dY/dist)*f1;p2.ax+=(dX/dist)*f2;p2.ay+=(dY/dist)*f2;}
+                        if(distSq<denSq){const w=1-M.sqrt(distSq/denSq);const e=(isShared||(p1.isPrime&&p2.isPrime))?1.5:1;p1.density+=w*e;p2.density+=w*e;}
+                        if(distSq<infSq){const w=1-M.sqrt(distSq/infSq);let pD=p2.phase-p1.phase;pD-=M.round(pD/360)*360;p1.phaseInfluence+=pD*w;p2.phaseInfluence-=pD*w;p1.influenceCount+=w;p2.influenceCount+=w;}
+                        if(dist<P.lineThr){const[r1,g1,b1]=getColor(M.min(p1.density/15,2),p1.isPrime);const[r2,g2,b2]=getColor(M.min(p2.density/15,2),p2.isPrime);const o=(0.05+M.min(p1.density+p2.density)/15*0.2)*(1-dist/P.lineThr)*(isShared?1.5:1);const grad=x.createLinearGradient(p1.x,p1.y,p2.x,p2.y);grad.addColorStop(0,`rgba(${r1},${g1},${b1},${o})`);grad.addColorStop(1,`rgba(${r2},${g2},${b2},${o})`);x.strokeStyle=grad;x.lineWidth=(isShared||(p1.isPrime&&p2.isPrime))?2:1;x.beginPath();x.moveTo(p1.x,p1.y);x.lineTo(p2.x,p2.y);x.stroke();}
+                    }
+                }
+            }
+        }
+        
+        particles.forEach(p=>{p.update();p.draw();});
+
+        if(frame++%10===0){const gC=M.floor(P.grid);const counts=new Array(gC*gC).fill(0);const cW=W/gC,cH=H/gC;particles.forEach(p=>{const i=M.floor(p.x/cW),j=M.floor(p.y/cH);if(i>=0&&i<gC&&j>=0&&j<gC)counts[i+j*gC]++;});let E=0;counts.forEach(c=>{if(c>0){const p=c/P.count;E-=p*M.log2(p);}});if(isFinite(E)){entropyHistory.push(E);if(entropyHistory.length>50)entropyHistory.shift();}gx.fillStyle='rgba(0,0,0,0.5)';gx.fillRect(0,0,200,100);gx.strokeStyle='#0f0';gx.beginPath();entropyHistory.forEach((e,i)=>gx.lineTo(i*4,100-(e/maxEntropy)*100));gx.stroke();gx.fillStyle='#fff';gx.font='10px sans-serif';gx.fillText('Entropy',5,15);}
+        
+        requestAnimationFrame(animate);
+    }
+    init();
+    animate();
+})();
+</script>
+</body>
+</html>
